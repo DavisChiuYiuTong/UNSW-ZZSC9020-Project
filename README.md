@@ -10,7 +10,7 @@ This GitHub repository is the main point of access for students and lecturers of
 
 ### Brief project description
 
-The task of forecasting electricity consumption in New South Wales (NSW) is geared towards tackling the issue of rising energy costs. The goal is to provide precise forecasts that allow consumers to make well-informed decisions about their energy use and expenses, thus promoting affordability and accessibility in the NSW energy market. This initiative uses historical data combined with various factors such as population growth, infrastructure development, economic trends, and governmental policies to create sophisticated forecasting models specific to NSW's unique energy requirements.![image](https://github.com/DavisChiuYiuTong/UNSW-ZZSC9020-Project/assets/167515819/08fe3bad-0245-461a-9e90-67f9ee986b44)
+The task of forecasting electricity consumption in New South Wales (NSW) is geared towards tackling the issue of rising energy costs. The goal is to provide precise forecasts that allow consumers to make well-informed decisions about their energy use and expenses, thus promoting affordability and accessibility in the NSW energy market. This initiative uses historical data combined with various factors such as population growth, infrastructure development, economic trends, and governmental policies to create sophisticated forecasting models specific to NSW's unique energy requirements.
 
 
 ## Repository structure
