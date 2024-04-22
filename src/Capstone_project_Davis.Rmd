@@ -1,0 +1,1004 @@
+---
+Title: "Assessment 3: Group Project"
+Project Name: "Electricity Demand Forecasting in New South Wales"
+Session: "Hexamester 2, 2024"
+Coursecode: "ZZSC9020"
+authors:
+  - "Yiu Tong, CHIU – z5039191"
+
+Date: "20 April 2024"
+
+Acknowledgements: 
+  - "Yiu Tong, CHIU - Data Analsyt"
+
+output: 
+  bookdown::html_document2:
+    fig_caption: yes
+    toc: yes
+    number_sections: yes
+    toc_float: true
+    toc_depth: 3
+    #includes:
+    #  in_header: <style>figcaption { text-align: center; }</style>
+---
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, warning=FALSE, message=FALSE}
+# Import libraries 
+library(ggplot2)
+library(dplyr)
+library(lattice)
+library(tidyverse)
+library(lubridate)
+library(fpp3)
+library(fable)
+library(fabletools)
+library(feasts)
+library(corrplot)
+library(forecast)
+library(tsibble)
+library(zoo)
+library(future)
+library(tseries)
+library(bookdown)
+library(Metrics)
+library(wavelets)
+library(randomForest)
+library(xgboost)
+library(caret)
+library(fable)
+```
+
+# Introduction
+
+This report provides a detailed analysis of predicting electricity demand in New South Wales (NSW) using advanced statistical and modeling approaches to enhance precision. It examines data from January 2010 to March 2021, featuring half-hourly figures on electricity usage and temperature. The objective is to develop and refine models for better forecasting accuracy.
+
+# Data Preperation
+
+## Input of Project Shared Data
+```{r, message=FALSE}
+dfTemp <- read_csv(unzip("../data/NSW/temperature_nsw.csv.zip", files = "temperature_nsw.csv", exdir = tempdir())[1])
+dfDemand <- read_csv(unzip("../data/NSW/totaldemand_nsw.csv.zip", files = "totaldemand_nsw.csv", exdir = tempdir())[1])
+```
+
+## Data Extraction from Github
+```{r ,message=FALSE}
+# Since the original forecastdemand file is too large, it is divided into 5 parts
+forecastDemand1 <- read_csv(unzip("../data/NSW/forecastdemand/forecastdemand_part1.csv.zip", files = "forecastdemand_part1.csv", exdir = tempdir())[1])
+forecastDemand2 <- read_csv(unzip("../data/NSW/forecastdemand/forecastdemand_part2.csv.zip", files = "forecastdemand_part2.csv", exdir = tempdir())[1])
+forecastDemand3 <- read_csv(unzip("../data/NSW/forecastdemand/forecastdemand_part3.csv.zip", files = "forecastdemand_part3.csv", exdir = tempdir())[1])
+forecastDemand4 <- read_csv(unzip("../data/NSW/forecastdemand/forecastdemand_part4.csv.zip", files = "forecastdemand_part4.csv", exdir = tempdir())[1])
+forecastDemand5 <- read_csv(unzip("../data/NSW/forecastdemand/forecastdemand_part5.csv.zip", files = "forecastdemand_part5.csv", exdir = tempdir())[1])
+```
+
+#### Combination of 5 forecastDemand files into 1 new dataframe, forecastDemandAll
+```{r}
+dfForecastDemand <- bind_rows(forecastDemand1, forecastDemand2, forecastDemand3, forecastDemand4,forecastDemand5) 
+```
+
+### Import External Data
+```{r message=FALSE}
+## Reference: https://www.michaelplazzer.com/datasets/australian-public-holiday-data/
+
+dfHoliday <- read_csv('../data/Aus_public_hols_2009-2022-1.csv')
+dfHoliday <- dfHoliday %>% 
+  filter(State == 'NSW')
+```
+
+## Data Cleaning
+
+### NA Values Detection
+#### Define NA Value Counting Function
+```{r}
+countNA <- function(dataFrame) {
+  # Calculate the total number of NA values in the dataframe
+  totalNA <- sum(is.na(dataFrame))
+  
+  # Check if there are any NA values
+  if (totalNA > 0) {
+    cat("True\n")
+    cat("Total number of NA values:", totalNA, "\n")
+  } else {
+    cat("False\n")
+    cat("No NA values present.\n")
+  }
+}
+```
+
+### Count NA Values for Dataframes
+``` {r}
+countNA(dfDemand)
+countNA(dfTemp)
+countNA(dfForecastDemand)
+countNA(dfHoliday)
+```
+```{r}
+# Check for duplicates
+duplicates <- duplicated(dfTemp)
+
+# View the rows that are duplicates
+dfTemp[duplicates, ]
+```
+# Exploratory Data Analysis
+## Univariate Analysis
+### Summary Statistic of Electricity Demand in NSW
+```{r}
+summary(dfDemand)
+```
+
+###  Define Function for DATETIME data 
+### Define function for DATETIME to datetime object
+```{r}
+convertDateTime <- function(df, dateTimeCol = "DATETIME", timeZone = "Australia/Brisbane") {
+  # Check for the presence of the specified datetime column
+  if (!dateTimeCol %in% names(df)) {
+    stop(paste(dateTimeCol, "column not found in the dataframe."))
+  }
+  
+  # Convert the datetime column to a datetime object
+  df[[dateTimeCol]] <- dmy_hm(df[[dateTimeCol]], tz = timeZone)
+  
+  return(df)
+}
+```
+
+### Define function for Add Time Attributes from Datetime
+```{r}
+addTimeAttr <- function(df, dateTimeCol = "DATETIME") {
+  # Check if the datetime column exists and is of POSIXct type
+  if (!dateTimeCol %in% names(df) || !inherits(df[[dateTimeCol]], "POSIXct")) {
+    stop(paste(dateTimeCol, "column is not properly formatted as datetime in the dataframe."))
+  }
+  # Add derived time attributes
+  df <- df %>%
+    mutate(
+      yearValue = year(.data[[dateTimeCol]]),
+      monthValue = month(.data[[dateTimeCol]]),
+      dayValue = day(.data[[dateTimeCol]]),
+      hourValue = hour(.data[[dateTimeCol]]),
+      minuteValue = minute(.data[[dateTimeCol]]),
+      timeOfDay = hour(.data[[dateTimeCol]]) + minute(.data[[dateTimeCol]]) / 60,
+      weekOfMonth = factor(
+        week(.data[[dateTimeCol]]) - week(floor_date(.data[[dateTimeCol]], "month")) + 1,
+        levels = 1:6  # Levels for weeks in a month
+      ),
+      dayOfWeek = factor(
+        wday(.data[[dateTimeCol]], label = TRUE),
+        levels = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+      )
+    )
+  
+  return(df)
+}
+```
+
+#### Convert DataTime into Timestampe & Check the Result
+```{r}
+dfDemand <- convertDateTime(dfDemand)
+head(dfDemand) 
+```
+### Add datetime addtribute for dfDemand
+```{r}
+dfDemand <- addTimeAttr(dfDemand)
+```
+
+### Add Time attributes for dfDemand
+```{r}
+dfDemand <- addTimeAttr(dfDemand)
+head(dfDemand) 
+```
+#### Remove 'REGIOINID' column from dfDemand
+```{r}
+dfDemand <- dfDemand %>%
+  select(-'REGIONID')
+```
+
+```{r}
+head(dfDemand)
+```
+
+### Electricity Demand
+
+#### Yearly Electricity Demand in NSW 
+```{r}
+# Calculate sequence of years for demarcation
+yearSeq <- seq(from = floor_date(min(dfDemand$DATETIME), "year"),
+                    to = ceiling_date(max(dfDemand$DATETIME), "year"),
+                    by = "1 year")
+
+# Enhanced visual plot using ggplot2
+dfDemand %>%
+  ggplot(aes(x = DATETIME, y = TOTALDEMAND)) +
+  geom_line(color = "deepskyblue4", linewidth = 1) +  
+  geom_vline(data = data.frame(x = yearSeq), 
+             aes(xintercept = as.numeric(x)), 
+             linetype = "dashed", color = "firebrick1") +  
+  scale_x_datetime(date_breaks = '1 year', date_labels = '%Y') +
+  labs(x = "Year", y = "Electricity Demand", 
+       title = "Yearly Electricity Demand in NSW") +
+  theme_light(base_size = 10) +  
+  theme(plot.title = element_text(hjust = 0.5, face="bold"), 
+        axis.title.x = element_text(face="italic"), 
+        axis.title.y = element_text(face="italic")) 
+```
+
+#### Hourly Electricity Demand by Season 
+```{r}
+# Create a new column 'Season' according to the month
+dfDemandSeason <- dfDemand %>%
+  mutate(Season = case_when(
+    monthValue %in% c(9, 10, 11) ~ "Spring",
+    monthValue %in% c(12, 1, 2) ~ "Summer",
+    monthValue %in% c(3, 4, 5) ~ "Autumn",
+    monthValue %in% c(6, 7, 8) ~ "Winter",
+    TRUE ~ NA_character_))
+
+dfDemandSeason$hourValue <- factor(dfDemandSeason$hourValue, levels = seq(0, 23))
+
+# Plot with adjusted y-axis labels
+bwplot(TOTALDEMAND ~ hourValue | Season, data = dfDemandSeason,
+       layout = c(2, 2),
+       xlab = "Hour of the Day", ylab = "Total Demand",
+       main = "Hourly Electricity Demand by Season",
+       scales = list(
+         x = list( cex = 0.5),
+         y = list(rot = 90, cex = 0.7)  
+       ))
+```
+
+### Summary Statistics of Air Temperature 
+```{r}
+summary(dfTemp)
+```
+```{r}
+# Remove 'LOCATION' column from dfTemp
+dfTemp <- dfTemp %>% select(-'LOCATION')
+head(dfTemp)
+```
+
+### Convert DateTime Value for Temperature
+```{r}
+dfTemp <- convertDateTime(dfTemp)
+head(dfTemp)
+```
+```{r}
+dfTemp <- addTimeAttr((dfTemp))
+head(dfTemp)
+```
+
+```{r}
+summary(dfTemp)
+```
+Since the temperature data updates occur at irregular minute intervals and the electricity demand data are recording every 30 minutes, temperature data with minuteValue other than 0 and 30 are removed.
+
+### Remove rows where minute are not equal to 0 or 30
+```{r}
+# Remove rows from dfTemp where minuteValue is not 0 or 30 and store the result in dfTemp
+dfTemp <- dfTemp %>%
+  filter(minuteValue == 0 | minuteValue == 30)
+
+# , print the resulting dataframe to verify the rows have been filtered correctly
+summary(dfTemp)
+```
+
+```{r Temperature-plot, fig.cap="Temperature Over Time."}
+
+dfTemp$DATETIME <- as.POSIXct(dfTemp$DATETIME)
+
+# Create a sequence of years from min to max year in 'DATETIME'
+yearBreaks <- seq(from = floor_date(min(dfTemp$DATETIME), "year"),
+                  to = ceiling_date(max(dfTemp$DATETIME), "year"),
+                  by = "1 year")
+
+# Determine the exact positions for x-axis labels
+labelPositions <- as.numeric(yearBreaks)
+
+# Plot using lattice with lines instead of points and adjusted x-axis
+temperaturePlot <- xyplot(TEMPERATURE ~ DATETIME, data = dfTemp,
+                          panel = function(x, y, ...) {
+                            # Plot data as a line
+                            panel.xyplot(x, y, type = "l", ...)
+                            # Add vertical lines for each year
+                            panel.abline(v = yearBreaks, col = "red", lty = 2)
+                          },
+                          scales = list(x = list(at = labelPositions, labels = format(yearBreaks, "%Y"),
+                                                 rot = 0)), # Labels are horizontal
+                          xlab = "Year",
+                          ylab = "Temperature",
+                          main = "Yearly Temperature Vairation in NSW")
+
+# Print the plot
+print(temperaturePlot)
+```
+The line graph showcasing temperature variations in New South Wales from 2010 to 2021 vividly illustrates a pronounced seasonal pattern, with temperature fluctuations that consistently repeat each year throughout the observed period. Each year within the dataset, temperatures in NSW ascend during the warmer months and descend during the cooler periods, showcasing a clear and predictable cycle of seasonal temperature changes. This regularity is marked by similar patterns emerging year after year, underscoring the stable and predictable nature of seasonal influences on the climate of NSW. 
+
+### Forecast Demand Data 
+When dealing with multiple forecast data points for each timestamp, taking the median value is an effective method to stabilize and enhance the reliability of the data. Each timestamp may have varying forecasts due to different modeling assumptions. By calculating the median, the discrepancies is , providing a more consistent and robust estimate of demand. This approach helps in reducing noise and ensures that the predictions are less influenced by outliers or extreme variations, making the forecast data more dependable for decision-making and analysis.
+
+```{r}
+# Group the data by 'DATETIME', then calculate the median of 'FORECASTDEMAND' for each group
+dfForecast <- dfForecastDemand %>%
+  group_by(DATETIME) %>%                    # Group data by the 'DATETIME' column
+  summarise(MedianForecastDemand = median(FORECASTDEMAND, na.rm = TRUE))  # Calculate median, removing NA values
+
+# View the new dataframe
+head(dfForecast)
+```
+
+### Summary Statistics of Forecast Demand in NSW
+```{r}
+summary(dfForecast)
+```
+The 'dfForecast' dataset provides a summary of forecasted demand in NSW from January 1, 2010, to March 18, 2021. The date distribution is centered around August 10, 2015, indicating a balanced spread over the analyzed period. Forecasted demand ranges from 4,835 to 14,583, with a median of 8,059 and a mean very close at 8,105, suggesting a relatively symmetric distribution around the central values. The quartile figures, with the first quartile at 7,123 and the third at 8,967, highlight the variability in forecasted demands. This data is crucial for understanding trends and making informed decisions in resource management and planning based on anticipated demand.
+
+## Bivariate Analysis
+```{r}
+head(dfDemand)
+head(dfHoliday)
+```
+
+### Effect of Holidays on Electricity Demand in NSW
+```{r}
+dfDemand <- dfDemand %>%
+  mutate(IsHoliday = case_when(
+    date(DATETIME) %in% dfHoliday$Date ~ 'Holiday', TRUE ~ 'Non-Holiday'
+  )) %>%
+  mutate(Date = as.Date(DATETIME))
+
+# Create a violin plot to compare electricity demand on holidays vs non-holidays
+ggplot(dfDemand, aes(x = IsHoliday, y = TOTALDEMAND, fill = IsHoliday)) +
+  geom_violin(trim = FALSE) +
+  labs(title = "Electricity Demand Comparison on Holidays vs Non-Holidays",
+       x = "", y = "Total Demand (MW)") +
+  scale_fill_manual(values = c("Holiday" = "red", "Non-Holiday" = "blue")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+The violin plot illustrates the differences in electricity demand between holidays and non-holidays. It shows that the median demand on holidays tends to be lower compared to non-holidays. Furthermore, this plot provides insight into the overall distribution and highlights several outliers that fall outside the common range for both holiday and non-holiday periods.
+```{r}
+head(dfDemand)
+```
+
+### Correlation of Electricity Demand vs Temperature
+```{r}
+# Merge the dfDemand and dfTemp based on 'DATETIME'
+dfDT <- inner_join(dfDemand, dfTemp, by = "DATETIME")
+
+# Calculate Pearson's correlation coefficient
+corrResult <- cor(dfDT$TOTALDEMAND, dfDT$TEMPERATURE, method = "pearson")
+
+# Print the correlation coefficient
+print(corrResult)
+
+# Perform a significance test
+corrTestResult <- cor.test(dfDT$TOTALDEMAND, dfDT$TEMPERATURE, method = "pearson")
+print(corrTestResult)
+```
+#### Pearson's Correlation
+Using Pearson's correlation to assess the relationship between electricity demand and temperature in NSW is well-suited due to both variables being continuous and the assumption that they share a linear relationship. 
+
+The Pearson correlation analysis between electricity demand ('TOTALDEMAND') and temperature ('TEMPERATURE') using the dataset 'dfMerged' produced a correlation coefficient ('cor') of 0.149. This positive correlation indicates that as the temperature increases, there is a slight upward trend in electricity demand. The results of the Pearson's test were highly statistically significant, as indicated by an extremely small p-value (less than 2.2e-16), strongly rejecting the null hypothesis that there is no correlation between these two variables.
+
+The confidence interval for this correlation, ranging from 0.1447 to 0.1534, is narrow, suggesting a stable estimate of the correlation coefficient. This interval underscores that, while the correlation is relatively modest, it is consistently different from zero across different samples from the population.
+
+In conclusion, the analysis confirms a statistically significant with positive relationship between temperature and electricity demand. This suggests that higher temperatures may lead to increased electricity usage, possibly due to greater use of cooling systems or other temperature-dependent activities.
+
+### Comparison of Forecast Electricity Demand vs Actual Electricity Demand
+```{r}
+# Inner join dfDemand & dfForecast
+dfDF <- inner_join(dfDemand, dfForecast, by = "DATETIME")
+head(dfDF)
+```
+
+```{r}
+# Select the data from 2015 to 2018 from dfDF
+dfDF2015_2018 <- dfDF %>%
+  filter(yearValue >= 2015 & yearValue <= 2018)
+```
+
+```{r}
+# Plot using ggplot2 with smoothed lines using dfFD
+plot <- ggplot(dfDF2015_2018, aes(x = DATETIME)) +
+  geom_smooth(aes(y = MedianForecastDemand, colour = "Median Forecast Demand"), 
+              method = "loess", se = FALSE, linewidth = 1) +
+  geom_smooth(aes(y = TOTALDEMAND, colour = "Total Demand"), 
+              method = "loess", se = FALSE, linewidth = 1) +
+  labs(title = "Smoothed Comparison of Median Forecast Demand and Actual Demand from 2015 to 2018",
+       x = "Year",
+       y = "Demand") +
+  scale_colour_manual(values = c("Median Forecast Demand" = "blue", "Total Demand" = "red")) +
+  theme_minimal()
+
+# Print the plot
+print(plot)
+```
+
+
+```{r}
+# Calculate MAE
+maeValue <- mae(dfDF$TOTALDEMAND, dfDF$MedianForecastDemand)
+print(paste("Mean Absolute Error (MAE):", maeValue))
+
+# Calculate RMSE
+rmseValue <- rmse(dfDF$TOTALDEMAND, dfDF$MedianForecastDemand)
+print(paste("Root Mean Squared Error (RMSE):", rmseValue))
+```
+MAE = 1412.6: This value suggests that on average, the predictions of the forecasting model deviate from the actual demand by about 1412.6 units. 
+
+RMSE = 1774.7: The value of 1774.7 indicates that while many of the predictions may be reasonably accurate, there are notable instances where the forecast deviates significantly from the actual demand. This could be indicative of the model's sensitivity to data anomalies or its failure to capture extreme fluctuations due to external factors or rare events.
+
+#### Determining Optmal Hour of Delay 
+```{r}
+calculateRMSE <- function(actual, predicted) {
+  sqrt(mean((predicted - actual)^2, na.rm = TRUE))
+}
+```
+
+```{r}
+# Define a range of delays to test, for example, from -12 to 12 hours
+delays <- seq(-24, 24, by = 1)  
+
+# Initialize a data frame to store the results
+results <- data.frame(Delay = integer(), RMSE = numeric())
+
+for (delay in delays) {
+  # Shift the forecast data by 'delay' hours
+  dfForecastShifted <- dfForecast %>%
+    mutate(DATETIME = DATETIME + hours(delay))
+  
+  # Merge with actual demand data
+  dfComparison <- inner_join(dfForecastShifted, dfDemand, by = "DATETIME")
+  
+  # Calculate RMSE for this delay
+  rmse <- calculateRMSE(dfComparison$TOTALDEMAND, dfComparison$MedianForecastDemand)
+  
+  # Store the results
+  results <- rbind(results, data.frame(Delay = delay, RMSE = rmse))
+}
+
+# Identify the delay with the minimum RMSE
+optimal_delay <- results[which.min(results$RMSE), ]
+print(optimal_delay)
+```
+The optimal number of delay hour is 10.
+
+#### Time Analysis of Error
+```{r}
+dfError <- dfComparison %>%
+  mutate(
+    AbsoluteError = abs(TOTALDEMAND - MedianForecastDemand),  # Mean Absolute Error component
+    SquaredError = (TOTALDEMAND - MedianForecastDemand)^2  # Mean Squared Error component
+  )
+```
+
+```{r}
+# Plotting Absolute Errors over Time
+ggplot(dfError, aes(x = DATETIME, y = AbsoluteError)) +
+  geom_line() +
+  labs(title = "Absolute Errors Over Time", x = "Year", y = "Absolute Error") +
+  theme_minimal()
+```
+
+```{r}
+# Plotting Squared Errors over Time
+ggplot(dfError, aes(x = DATETIME, y = SquaredError)) +
+  geom_line() +
+  labs(title = "Squared Errors Over Time", x = "Datetime", y = "Squared Error") +
+  theme_minimal()
+```
+
+```{r}
+dfErrorOutlier <- dfError %>%
+  mutate(
+    IQR = IQR(AbsoluteError, na.rm = TRUE),  # Calculate IQR
+    UpperBound = quantile(AbsoluteError, 0.75, na.rm = TRUE) + 1.5 * IQR,
+    LowerBound = quantile(AbsoluteError, 0.25, na.rm = TRUE) - 1.5 * IQR,
+    Outlier = AbsoluteError > UpperBound | AbsoluteError < LowerBound  # Identify outliers
+  )
+```
+
+```{r}
+# Create groups of consecutive outliers
+dfErrorOutlier <- dfErrorOutlier %>%
+  mutate(
+    SquaredError = abs(TOTALDEMAND - MedianForecastDemand),
+    Outlier = SquaredError > (quantile(SquaredError, 0.75, na.rm = TRUE) + 1.5 * IQR(SquaredError, na.rm = TRUE))
+  ) %>%
+  arrange(DATETIME) %>%
+  mutate(
+    GroupChange = Outlier != lag(Outlier, default = first(Outlier)),
+    Group = cumsum(GroupChange)
+  )
+
+# Getting intervals for outliers
+outlierInterval <- dfErrorOutlier %>%
+  filter(Outlier) %>%
+  group_by(Group) %>%
+  summarise(
+    Start = min(DATETIME),
+    End = max(DATETIME)
+  ) %>%
+  ungroup()
+
+# Plotting Squared Errors over Time with Outlier intervals highlighted
+plot <- ggplot() +
+  geom_rect(data = outlierInterval, aes(xmin = Start, xmax = End, ymin = -Inf, ymax = Inf), fill = "red", alpha = 0.2) +
+  geom_line(data = dfErrorOutlier, aes(x = DATETIME, y = SquaredError), color = "gray", alpha = 0.5) +
+  geom_point(data = dfErrorOutlier, aes(x = DATETIME, y = SquaredError, color = Outlier), linewidth = 1, alpha = 0.8) +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+  labs(title = "Squared Errors Over Time with Outliers Highlighted") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold")  # Center and bold the title
+  ) +
+  geom_vline(data = data.frame(x = seq(from = floor_date(min(dfErrorOutlier$DATETIME), "year"),
+                                       to = ceiling_date(max(dfErrorOutlier$DATETIME), "year"),
+                                       by = "1 year")),
+             aes(xintercept = as.numeric(x)), linetype = "dashed", color = "blue") +
+  scale_x_datetime(breaks = seq(from = floor_date(min(dfErrorOutlier$DATETIME), "year"),
+                                to = ceiling_date(max(dfErrorOutlier$DATETIME), "year"),
+                                by = "1 year"),
+                   labels = scales::date_format("%Y"))  # Formatting labels to show only the year part
+
+print(plot)
+```
+
+### STL Decomposition
+
+```{r}
+# Convert the dataframe to a tsibble object
+dfDemandTS <- dfDemand %>%
+  select(DATETIME, TOTALDEMAND) %>% 
+  as_tsibble(index = DATETIME) 
+
+decomposed <- dfDemandTS %>%
+  model(STL = STL(TOTALDEMAND ~ season(window = "periodic"),
+                  robust = TRUE)) %>%
+  components()
+
+decomposed %>% autoplot()
+```
+
+### Wavelet Decomposition
+```{r}
+# Perform a discrete wavelet transform (DWT)
+totalDemand <- as.numeric(dfDemand$TOTALDEMAND)
+
+# Perform a discrete wavelet transform (DWT)
+# Choose 'haar' as the wavelet filter and specify the number of decomposition levels (n.levels)
+dwtResult <- dwt(totalDemand, filter = "haar", n.levels = 4, boundary = "periodic")
+
+# Reconstruct the time series from wavelet coefficients
+reconstructed <- idwt(dwtResult)
+
+# Create a data frame for plotting
+plotData <- data.frame(Index = seq_along(totalDemand),
+                       Original = totalDemand,
+                       Reconstructed = reconstructed)
+
+# Plot 
+ggplot(plotData) +
+  geom_point(aes(x = Index, y = Original), color = "blue", alpha = 0.5) +
+  geom_point(aes(x = Index, y = Reconstructed), color = "red", alpha = 0.5) +
+  labs(title = "Original vs Reconstructed Series",
+       x = "Index",
+       y = "Value") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Correlation Heatmap
+
+### Electricity Demand
+```{r}
+head(dfDemand)
+```
+### Convert "IsHoliday" from chr type into binary type, 1 and 0 
+```{r}
+dfDemand <- dfDemand %>%
+  mutate(IsHoliday = ifelse(IsHoliday == "Holiday", 1, 0))
+```
+
+```{r}
+head(dfDemand)
+```
+
+```{r}
+dfCorHM <- dfDemand %>% 
+  select(-DATETIME, -Date, -timeOfDay, -minuteValue) %>% 
+  mutate(across(everything(), as.numeric))
+
+corMatrix <- cor(dfCorHM)
+
+corrplot(corMatrix, method = "color", type = "full", order = "hclust",
+         tl.col = "black", tl.srt = 45, 
+         addCoef.col = "black") 
+```
+```{r}
+# Extracting the correlation of each variable with TOTALDEMAND
+totalDemandCor <- corMatrix["TOTALDEMAND", ]
+totalDemandCor <- totalDemandCor[order(-abs(totalDemandCor))]  # Sorting by absolute value
+
+# Removing TOTALDEMAND's self-correlation
+totalDemandCor <- totalDemandCor[totalDemandCor != 1]
+
+# Viewing the ranked correlations
+print(totalDemandCor)
+```
+
+## Check for Stationary by Augmented Dickey-Fuller Test
+
+```{r}
+# Extract TOTALDEMAND for modeling
+totalDemand <- dfDemandTS %>% select(TOTALDEMAND) %>% unlist()
+
+tsData <- ts(totalDemand, frequency = 336) # 48 half-hours per day * 7 days = 336 half-hours per week
+adfTest <- adf.test(tsData, alternative = "stationary")
+print(adfTest)
+```
+### Apply Regular First Differencing
+```{r}
+# First difference
+tsDataDiff <- diff(tsData, differences = 1)
+
+# Perform ADF test again
+adfTestDiff <- adf.test(tsDataDiff, alternative = "stationary")
+print(adfTestDiff)
+```
+The results from the Augmented Dickey-Fuller (ADF) test on the differenced data (tsDataDiff) indicate that after applying first differencing, the time series has become stationary. The test statistic is significantly negative (-72.871), and the p-value is 0.01, which is well below the conventional threshold of 0.05. This suggests you can reject the null hypothesis of non-stationarity. The warning about the p-value being smaller than printed indicates that the true p-value is very small, reinforcing the conclusion that the series is stationary
+
+### Determine the orders of the autoregressive (AR) and moving average (MA) components for the ARIMA model. 
+
+### ACF Plot for Daily Seasonality
+```{r}
+dfDemandTS %>% 
+  mutate(demandDiff = difference(TOTALDEMAND, 48)) %>% 
+  ACF(demandDiff) %>% 
+  autoplot()
+```
+The ACF drops to 0 at lag = 
+
+### ACF Plot of Daily and Weekly Seaonality
+```{r}
+dfDemandTS %>% 
+  mutate(demandDiff = difference(TOTALDEMAND, 48)) %>% 
+  ACF(demandDiff, lag_max = 336) %>% 
+  autoplot()
+```
+
+### PACF Plot for Daily Seasonality
+```{r}
+dfDemandTS %>% 
+  mutate(demandDiff = difference(TOTALDEMAND, 48)) %>% 
+  PACF(demandDiff) %>% 
+  autoplot()
+```
+### PACF Plot for Daily and Weekly Seasonality
+```{r}
+dfDemandTS %>% 
+  mutate(demandDiff = difference(TOTALDEMAND, 48)) %>% 
+  PACF(demandDiff, lag_max = 336) %>% 
+  autoplot()
+```
+### PACF Plot for Daily and Monthly Seasonality
+```{r}
+dfDemandTS %>% 
+  mutate(demandDiff = difference(TOTALDEMAND, 48)) %>% 
+  PACF(demandDiff, lag_max = 1440) %>% 
+  autoplot()
+```
+
+```{r}
+# Check for duplicates
+duplicates <- duplicated(dfDemand)
+
+# View the rows that are duplicates
+dfDemand[duplicates, ]
+```
+# Modellings
+
+## Findings from EDA
+* First differencing makes data stationary
+* Daily, Weekly Seasonality Detected
+* Optimal hours of delay = 10 
+* Variables with Absolute correlation over 0.1, hourValue, yearValue, monthValue, IsHoliday
+
+## Data Preparation for Modelling
+```{r}
+head(dfDemand)
+```
+```{r}
+head(dfTemp)
+```
+
+#### Select DATETIME, TEMPERATURE from dfTemp
+```{r}
+# Prepare dfTemp with DATETIME, TEMPERATURE
+dfTemp <- dfTemp %>% 
+  select(c(DATETIME, TEMPERATURE))
+head(dfTemp)
+```
+```{r}
+# Check for duplicates
+duplicates <- duplicated(dfTemp)
+
+# View the rows that are duplicates
+dfTemp[duplicates, ]
+```
+#### Merge dfDemand, dfTemp by DATETIME into dfDT
+```{r}
+# Merge dfDemand and dfTemp by DATETIME
+dfDT <- left_join(dfDemand, dfTemp, by = 'DATETIME')
+head(dfDT)
+```
+```{r}
+# Check for duplicates
+duplicates <- duplicated(dfDT)
+
+# View the rows that are duplicates
+dfDT[duplicates, ]
+```
+
+#### Count NA
+```{r}
+countNA(dfDT)
+```
+#### Fill NA
+```{r}
+dfDT$TEMPERATURE <- na.spline(dfDT$TEMPERATURE)
+```
+
+
+#### select DATETIME, TOTALDEMAND, TEMPERATURE, hourValue, yearValue, monthValue, IsHoliday from dfModel to dfModel
+```{r}
+dfModel <- dfDT %>% 
+  select(DATETIME, TOTALDEMAND, TEMPERATURE, hourValue, yearValue, monthValue, IsHoliday)
+head(dfModel)
+```
+#### Check NA values
+```{r}
+# Check NA
+countNA(dfModel)
+```
+
+#### Check Duplicate Values
+```{r}
+# Check for duplicates
+duplicates <- duplicated(dfModel)
+
+# View the rows that are duplicates
+dfModel[duplicates, ]
+```
+#### Remove 13 Duplicate values
+```{r}
+# Remove duplicates
+dfModel <- dfModel[!duplicated(dfModel), ]
+
+# View the first few rows of the data frame without duplicates
+head(dfModel)
+```
+#### Confirm No Duplicate in dfModel
+```{r}
+# Check for duplicates
+duplicates <- duplicated(dfModel)
+
+# View the rows that are duplicates
+dfModel[duplicates, ]
+```
+```{r}
+str(dfModel)
+```
+### Filter Last 5 Years Data
+```{r}
+# Calculate the start date for the last 5 years from the last available date in the dataset
+endDate <- max(dfModel$DATETIME) - years(3)
+startDate <- endDate - years(5)
+
+# Filter the dataset to include only data from the last 5 years
+df5Yr <- dfModel %>%
+  filter(DATETIME >= startDate & DATETIME <= endDate)
+
+```
+
+###  Training and Testing Dataset Spliting in 70/30
+```{r}
+# Calculate the number of rows to include in the training set
+trainSize <- floor(0.7 * nrow(df5Yr))
+
+# Create the training and testing datasets
+trainSet <- df5Yr[1:trainSize, ]
+testSet <- df5Yr[(trainSize + 1):nrow(df5Yr), ]
+```
+
+```{r}
+print(testSet)
+print(trainSet)
+```
+
+
+```{r}
+cat("Number of observations in the training set:", nrow(trainSet), "\n")
+cat("Number of observations in the testing set:", nrow(testSet), "\n")
+```
+
+#### Convert trainSet to tsibble 
+```{r}
+tsTrainSet <- trainSet %>% 
+  as_tsibble(index = DATETIME)
+```
+
+#### Fill Gap Values
+```{r}
+# Fill gaps in the time series
+tsTrainSet <- tsTrainSet %>%
+  fill_gaps(TOTALDEMAND = NA)  # Fill Gap with NA
+```
+
+```{r}
+print(nrow(tsTrainSet))
+```
+#### Convert testSet to tsibble 
+```{r}
+tsTestSet <- testSet %>%
+  as_tsibble(index = DATETIME)
+```
+
+#### Fill Gap Values
+```{r}
+# Fill gaps in the time series
+tsTestSet <- tsTestSet %>%
+  fill_gaps(TOTALDEMAND = NA)  # Fill Gap values with NA
+```
+
+```{r}
+print(nrow(tsTestSet))
+```
+
+### Model Training
+```{r}
+# Train SARIMA model with first order differencing and Fourier daily seasonality
+sarimaD1FrDModel <- tsTrainSet %>% 
+  model(
+    sarimaD1FrD = ARIMA(TOTALDEMAND ~ pdq(0,1,0) + 
+                        PDQ(0,0,0) + 
+                        fourier(K=3, period=48))
+      
+  )
+```
+
+```{r}
+# Train SARIMA model with first order differencing, Fourier daily and weekly seasonality 
+sarimD1FrDWModel <- tsTrainSet %>% 
+  model(
+    sarimD1FrDW = ARIMA(TOTALDEMAND ~ pdq(0,1,0) + 
+                        PDQ(0,0,0) + 
+                        fourier(K=3, period=48) +
+                        fourier(K=3, period=48*7))
+  )
+```    
+
+```{r}
+# Train SARIMA model with first order differencing, Fourier daily and weekly seasonality and TEMPERATURE
+sarimD1FrDWTempModel <- tsTrainSet %>% 
+  model(
+    sarimD1FrDWTemp = ARIMA(TOTALDEMAND ~ pdq(0,1,0) + 
+                            PDQ(0,0,0) +
+                            fourier(K=3, period=48) +
+                            fourier(K=3, period=48*7) + 
+                            TEMPERATURE)
+  )
+```
+### AIC BIC
+
+```{r}
+sarimaD1FrDModel %>% glance(fit) %>% arrange(BIC) %>% select(.model:BIC)
+sarimD1FrDWModel %>% glance(fit) %>% arrange(BIC) %>% select(.model:BIC)
+sarimD1FrDWTempModel %>% glance(fit) %>% arrange(BIC) %>% select(.model:BIC)
+
+```
+
+### Models Performance with Test Set
+
+#### Define function for MAE and RMSE
+```{r}
+calFcAcc <- function(fcFable, actualTs) {
+  # Prepare forecast data
+  avgFc <- fcFable %>%
+    as_tibble() %>%
+    select(DATETIME, .mean)
+  
+  # SJoin forecast data with actual data
+  accData <- inner_join(avgFc, actualTs, by = "DATETIME")
+  
+  # Calculate MAE
+  mae <- mean(abs(accData$.mean - accData$TOTALDEMAND), na.rm = TRUE)
+
+  # Calculate RMSE
+  rmse <- sqrt(mean((accData$.mean - accData$TOTALDEMAND)^2, na.rm = TRUE))
+  cat("Mean Absolute Error (MAE):", mae, "\n")
+  cat("Root Mean Squared Error (RMSE):", rmse, "\n")
+}
+```
+
+### Calculate Accuracy
+
+```{r}
+# Forecasting using the model with first order differencing and fourier daily seasonality
+sarimaD1FrDFc <- sarimaD1FrDModel %>%
+  forecast(new_data = tsTestSet)
+```
+
+```{r}
+# Print the forecast results
+calFcAcc(sarimaD1FrDFc, tsTestSet)
+```
+
+```{r}
+# Forecasting using the model with first order differencing, daily and weekly seasonality using Fourier terms
+sarimD1FrDWFc <- sarimD1FrDWModel %>%
+  forecast(new_data = tsTestSet)
+
+# Print the forecast results
+calFcAcc(sarimD1FrDWFc, tsTestSet)
+```
+
+```{r}
+# Forecasting using the model with first order differencing, daily seasonality, Fourier weekly seasonality, and temperature
+sarimD1FrDWTempFc <- sarimD1FrDWTempModel %>%
+  forecast(new_data = tsTestSet)
+
+# Print the forecast results
+calFcAcc(sarimD1FrDWTempFc, tsTestSet)
+```
+
+
+### Plot Model Forecast Demand vs Actual Demand
+#### Define Function to convert Forecast from fable to tibble
+```{r}
+fableTb <- function(fable){
+  tb <- fable %>% 
+  as_tibble() %>%
+  select(DATETIME, .mean)
+  return(tb)
+}
+```
+
+```{r}
+head(tsTestSet)
+```
+
+```{r}
+# Join the datasets by DateTime
+tbSarimaD1FrDFc <- fableTb(sarimaD1FrDFc) %>% 
+  rename(sarimaD1FrD_mean = .mean)
+tbSarimD1FrDWFc <- fableTb(sarimD1FrDWFc) %>% 
+  rename(sarimD1FrDW_mean = .mean)
+tbSarimD1FrDWTempFc <- fableTb(sarimD1FrDWTempFc) %>%
+  rename(sarimD1FrDWTemp_mean = .mean)
+
+joinData <- reduce(list(tbSarimaD1FrDFc, tbSarimD1FrDWFc, tbSarimD1FrDWTempFc, tsTestSet), full_join, by = "DATETIME")
+
+# Plot the data
+plot <- ggplot(joinData, aes(x = DATETIME)) +
+  geom_smooth(aes(y = TOTALDEMAND, color = "Actual Demand"), method = "loess", se = FALSE, linewidth = 1) +
+  geom_smooth(aes(y = sarimaD1FrD_mean, color = "SarimaD1FrD Forecast"), method = "loess", se = FALSE, linewidth = 1) +
+  geom_smooth(aes(y = sarimD1FrDW_mean, color = "SarimD1FrDW Forecast"), method = "loess", se = FALSE, linewidth = 1) +
+  geom_smooth(aes(y = sarimD1FrDWTemp_mean, color = "SarimD1FrDWTemp Forecast"), method = "loess", se = FALSE, linewidth = 1) +
+  labs(title = "Comparison of Actual Demand vs Forecasts",
+       x = "DateTime",
+       y = "Demand",
+       color = "Legend") +
+  theme_minimal() +
+  scale_color_manual(values = c("Actual Demand" = "black", 
+                                "SarimaD1FrD Forecast" = "blue", 
+                                "SarimD1FrDW Forecast" = "red", 
+                                "SarimD1FrDWTemp Forecast" = "green"))
+
+# Print the plot
+print(plot)
+```
+
